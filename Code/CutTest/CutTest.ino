@@ -20,7 +20,7 @@
 #define PWM_C_PIN 25
 
 #define COUNT_TIME	10000
-#define CUT_TIME		10000
+#define CUT_TIME	10000
 #define ARMING_TIME	2000
 
 /////////////

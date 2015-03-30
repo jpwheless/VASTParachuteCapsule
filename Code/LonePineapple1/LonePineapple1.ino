@@ -68,7 +68,7 @@
 #define CSV_GNDCRS			6
 #define CSV_ACC					7
 #define CSV_NSATS				8
-#define CSV_EXTTMP			9
+#define CSV_EXTTEMP			9
 #define CSV_BATTEMP			10
 #define CSV_INTTEMP			11
 #define CSV_PRES				12
@@ -91,6 +91,13 @@
 #define PUBX00_NSAT		18	// (int)		Number of satellites used in nav solution
 
 #define TIMEZONE			-700	// Relative to UTC (hours*100)
+
+#define CUT_ARM_TIME		60000
+#define CUT_EXEC_TIME		60000
+
+#define PARA_ARM_TIME		60000
+#define PARA_EXEC_TIME	60000
+
 
 //////////////////
 // I2C Commands //
@@ -334,8 +341,11 @@ public:
 				offset = (int64_t(cal[1]) << 17) + (int64_t(cal[3])*dT >> 6);
 				sensitivity = (int64_t(cal[0]) << 16) + ((int64_t(cal[2])*dT) >> 7);
 
+				//Serial.print(offset);
+				//Serial.println(sensitivity);
+
 				// Second-order correction for low temperature
-				if (intTemp < 2000) {
+				if (intTemp < 204700) {
 					int64_t temp2;
 					int64_t off2;
 					int64_t sens2;
@@ -344,15 +354,22 @@ public:
 					off2 = (61*(int64_t(intTemp)-2000)*(int64_t(intTemp)-2000)) >> 4;
 					sens2 = 2*(int64_t(intTemp)-2000)*(int64_t(intTemp)-2000);
 
+					//Serial.print(offset);
+					//Serial.println(sensitivity);
+
 					if (intTemp < -1500) {
 						off2 += 15*(int64_t(intTemp)+1500)*(int64_t(intTemp)+1500);
 						sens2 += 8*(int64_t(intTemp)+1500)*(int64_t(intTemp)+1500);
+
+						//Serial.print(offset);
+						//Serial.println(sensitivity);
 					}
 
 					intTemp -= temp2;
 					offset -= off2;
 					sensitivity -= sens2;
 				}
+				//Serial.println();
 				return false;
 				break;
 			case 2:
@@ -712,6 +729,7 @@ public:
 		this->maxVoltage = constrain(maxVoltage, 0.0, 5.0);
 
 		pinMode(pin, OUTPUT);
+		off();
 	}
 
 	void on(float power, float batVolt) {
@@ -1026,7 +1044,6 @@ const float BatterySense::capLookup[] = { // Assumes < 0.2A current draw
 	60.00,62.32,64.72,67.25,69.98,74.22,77.37,79.69,82.49,85.02,88.79,92.48,95.28,97.67,100.0};
 const int BatterySense::tblSize = 43;
 
-
 class Heater {
 private:
 	LMT84LPinterface *thermometer;
@@ -1058,6 +1075,172 @@ public:
 	}
 };
 
+enum stateEnum {MONITORING, ARMED, EXECUTING, COMPLETE};
+
+/*
+class Parachute {
+private:
+GPOinterface *wire;
+
+	bool maxAltIncreasedLast;
+	bool outsideBoundariesLast;
+	bool aboveArmAltLast;
+	bool fallingLast;
+
+public:
+	stateEnum state;
+	bool maxAltIncreased;
+	bool outsideBoundaries;
+	bool aboveArmAlt;
+	bool falling;
+
+	ElapsedMillis cutTimer;
+	ElapsedMillis timerA;
+	ElapsedMillis timerB;
+
+	void init(GPOinterface &wire) {
+		this->wire = wire;
+		state = MONITORING;
+		maxAltIncreasedLast = false;
+		outsideBoundariesLast = false;
+		aboveArmAltLast = false;
+		fallingLast = false;
+		maxAltIncreased = false;
+		outsideBoundaries = false;
+		aboveArmAlt = false;
+		falling = false;
+	}
+
+	void update() {
+		switch(state) {
+			default:
+			case MONITORING:
+				if (aboveArmAlt) {
+					if (!aboveArmAltLast) timerA = 0;
+					if (timer >= 30*1000) state = ARMED;
+				}
+				aboveArmAltLast = aboveArmAlt;
+				break;
+			case ARMED:
+				if (outsideBoundaries) {
+					if (!outsideBoundariesLast) timerA = 0;
+					if (timerA >= 60*1000) {
+						state = EXECUTING;
+						wire.on(1.0, 4.2);
+						timerA = 0;
+					}
+				}
+				outsideBoundariesLast = outsideBoundaries;
+				if (falling) {
+					if (!fallingLast) timerB = 0;
+					if (timerB >= 10*1000) {
+						state = EXECUTING;
+						wire.on(1.0, 4.2);
+						timerA = 0;
+					}
+				}
+				fallingLast = falling;
+				if (cutTimer >= 3*3600*1000) {
+					state = EXECUTING;
+					wire.on(1.0, 4.2);
+					timerA = 0;
+				}
+				break;
+			case EXECUTING:
+				if (timerA >= 10*1000) {
+					state = COMPLETE;
+					wire.off();
+				}
+			case COMPLETE:
+				break;
+		}
+	}
+
+};
+
+class CutDown {
+private:
+	GPOinterface *wire;
+	Battery *battery;
+
+	bool maxAltIncreasedLast;
+	bool outsideBoundariesLast;
+	bool aboveArmAltLast;
+	bool fallingLast;
+
+public:
+	stateEnum state;
+	bool maxAltIncreased;
+	bool outsideBoundaries;
+	bool aboveArmAlt;
+	bool falling;
+
+	elapsedMillis cutTimer;
+	elapsedMillis timerA;
+	elapsedMillis timerB;
+
+	void init(GPOinterface &wire, Battery &battery) {
+		this->wire = wire;
+		this->battery = battery;
+
+		state = MONITORING;
+		maxAltIncreasedLast = false;
+		outsideBoundariesLast = false;
+		aboveArmAltLast = false;
+		fallingLast = false;
+		maxAltIncreased = false;
+		outsideBoundaries = false;
+		aboveArmAlt = false;
+		falling = false;
+	}
+
+	void update() {
+		switch(state) {
+			default:
+			case MONITORING:
+				if (aboveArmAlt) {
+					if (!aboveArmAltLast) timerA = 0;
+					if (timer >= 30*1000) state = ARMED;
+				}
+				aboveArmAltLast = aboveArmAlt;
+				break;
+			case ARMED:
+				if (outsideBoundaries) {
+					if (!outsideBoundariesLast) timerA = 0;
+					if (timerA >= 60*1000) {
+						state = EXECUTING;
+						wire.on(1.0, battery.voltage);
+						timerA = 0;
+					}
+				}
+				outsideBoundariesLast = outsideBoundaries;
+				if (falling) {
+					if (!fallingLast) timerB = 0;
+					if (timerB >= 10*1000) {
+						state = EXECUTING;
+						wire.on(1.0, battery.voltage);
+						timerA = 0;
+					}
+				}
+				fallingLast = falling;
+				if (cutTimer >= 3*3600*1000) {
+					state = EXECUTING;
+					wire.on(1.0, battery.voltage);
+					timerA = 0;
+				}
+				break;
+			case EXECUTING:
+				if (timerA >= 10*1000) {
+					state = COMPLETE;
+					wire.off();
+				}
+			case COMPLETE:
+				break;
+		}
+	}
+};
+*/
+
 //////////////////////
 // Global Variables //
 //////////////////////
@@ -1079,11 +1262,13 @@ Rainbow rainbowLED;
 
 elapsedMicros loopTimer;
 elapsedMillis blinkTimer;
+elapsedMillis cutdownTimer;
 
 bool lightToggle;
 bool loggingEnabled;
 
-enum stateEnum {MONITORING, ARMED, EXECUTING, COMPLETED};
+stateEnum cutdownState;
+stateEnum parachuteState;
 
 ////////////////////
 // Main Functions //
@@ -1092,7 +1277,7 @@ enum stateEnum {MONITORING, ARMED, EXECUTING, COMPLETED};
 void setup() {
 	Serial.begin(115200);
 
-	analogWriteFrequency(PWM_A_PIN, PWM_FREQ); // Ideal frequency for 12-bit pwm
+	analogWriteFrequency(PWM_A_PIN, PWM_FREQ); // Ideal frequency for 11-bit pwm
 	analogWriteFrequency(PWM_B_PIN, PWM_FREQ);
 	analogWriteFrequency(PWM_C_PIN, PWM_FREQ);
 	analogWriteResolution(PWM_RES);
@@ -1101,11 +1286,11 @@ void setup() {
 	Wire.begin();
 
 	thermBat.init(THERM_1, 1.0, 1.0176, -2.0087);
-	//thermExt.init(THERM_2, 1.0);
-	//paraNichrome.init(GPO_2, 4.2);
+	thermExt.init(THERM_2, 1.0, 1.0176, -2.0087);
+	paraNichrome.init(GPO_2, 1.4);
 	//cutNichrome.init(GPO_1, 4.2);
 	//testNichrome.init(GPO_4, 4.2);
-	batteryHeat.init(GPO_3, &thermBat, 25.0, 1.0, 0.25);
+	batteryHeat.init(GPO_3, &thermBat, 25.0, 1.0, 0.5);
 	battery.init(BAT_VSNS, BAT_VSNS_MULT, 1.0);
 	button.init(PUSH_BUT, true, 8000);
 	rgb.init(RGB_R, RGB_G, RGB_B, true);
@@ -1126,6 +1311,7 @@ void setup() {
 		rgb.color(0,0,0);
 		delay(500);
 	}
+	/*
 	if (!sdCard.init(SD_CS)) while(1) {
 		Serial.println("SD card initialization failed.");
 		rgb.color(127,0,0);
@@ -1133,6 +1319,7 @@ void setup() {
 		rgb.color(0,0,0);
 		delay(500);
 	}
+	*/
 
 	loopTimer = 0;
 	blinkTimer = 0;
@@ -1144,6 +1331,7 @@ void loop() {
 	battery.read(loopTimer);
 	batteryHeat.update(loopTimer);
 	if (!barometer.measComplete) barometer.measure();
+	thermExt.read(loopTimer);
 	rainbowLED.cycle();
 	button.read();
 
@@ -1161,7 +1349,8 @@ void loop() {
 		sdCard.buffer(gps.groundCourse, CSV_GNDCRS, 1);
 		sdCard.buffer(gps.accuracy, CSV_ACC, 2);
 		sdCard.buffer(gps.nSats, CSV_NSATS);
-		sdCard.buffer(thermBat.celsius, CSV_EXTTMP, 2);
+		sdCard.buffer(thermExt.celsius, CSV_EXTTEMP, 2);
+		sdCard.buffer(thermBat.celsius, CSV_BATTEMP, 2);
 		sdCard.buffer(barometer.celsius, CSV_INTTEMP, 2);
 		sdCard.buffer(barometer.kPa, CSV_PRES, 2);
 		sdCard.buffer(battery.voltage, CSV_BATVOLT, 2);
@@ -1174,7 +1363,7 @@ void loop() {
 		}
 		Serial.println();
 
-		if (rainbowLED.active) sdCard.logToSD();
+		//if (rainbowLED.active) sdCard.logToSD();
 
 		blinkTimer = 0;
 		lightToggle = true;
@@ -1184,11 +1373,18 @@ void loop() {
 		led.write(0);
 	}
 
-	if (button.rose) (rainbowLED.active) ? rainbowLED.off() : rainbowLED.on();
+	if (button.fell) {
+		paraNichrome.off();
+		rainbowLED.off();
+	}
+	else if (button.rose) {
+		paraNichrome.on(1.0, battery.voltage);
+		rainbowLED.on();
+	}
 
 	// Balloon cutdown sequence:
 	// Arm cutdown if:
-	//		altitude > start+5000ft for more than 60s
+	//		altitude > 10000ft for more than 60s
 	// Initiate cutdown if:
 	// 		(New max altitude is unset for more than 10mins OR
 	// 		Location exceeds boundary box for more than 60s)
@@ -1200,4 +1396,6 @@ void loop() {
 	// Deploy parachute if:
 	// 		(currentAltitude < 10000ft AND 
 	// 		RoC <= -20 ft/min)
+	// 		
+	
 }
