@@ -32,12 +32,14 @@ THE SOFTWARE.
 // Arduino Wire library is required if I2Cdev I2CDEV_ARDUINO_WIRE implementation
 // is used in I2Cdev.h
 #include <Wire.h>
+#include <I2Cdev.h>
+
 
 // I2Cdev and MPU9150 must be installed as libraries, or else the .cpp/.h files
 // for both classes must be in the include path of your project
-#include <I2Cdev.h>
-#include <MPU9150.h>
-#include <helper_3dmath.h>
+#include "MPU9150_9Axis_MotionApps41.h"
+#include "helper_3dmath.h"
+
 
 // class default I2C address is 0x68
 // specific I2C addresses may be passed as a parameter here
@@ -71,6 +73,8 @@ void setup() {
 	Serial.println("Testing device connections...");
 	Serial.println(accelGyroMag.testConnection() ? "MPU9150 connection successful" : "MPU9150 connection failed");
 
+
+	accelGyroMag.dmpInitialize();
 	// configure Arduino LED for
 	pinMode(LED_PIN, OUTPUT);
 }

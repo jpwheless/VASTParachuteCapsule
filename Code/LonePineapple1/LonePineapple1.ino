@@ -92,12 +92,7 @@
 
 #define TIMEZONE			-700	// Relative to UTC (hours*100)
 
-#define CUT_ARM_TIME		60000
-#define CUT_EXEC_TIME		60000
-
-#define PARA_ARM_TIME		60000
-#define PARA_EXEC_TIME	60000
-
+#define NICH_CUT_TIME	10 	// Seconds
 
 //////////////////
 // I2C Commands //
@@ -629,7 +624,7 @@ private:
 						break;
 					case PUBX00_EW:
 						// Represent eastern latitude as negative
-						if (value == "E") longitude = -longitude;
+						if (value == "W") longitude = -longitude;
 						break;
 					case PUBX00_ALT:
 						altitude = value.toFloat();
@@ -1075,79 +1070,92 @@ public:
 	}
 };
 
-enum stateEnum {MONITORING, ARMED, EXECUTING, COMPLETE};
+enum stateEnum {MONITORING, ARMED, PREPPING, EXECUTING, COMPLETE};
+String printEnum(stateEnum state) {
+	switch (state) {
+		case MONITORING:
+			return "Monitoring";
+			break;
+		case ARMED:
+			return "Armed";
+			break;
+		case PREPPING:
+			return "Prepping";
+			break;
+		case EXECUTING:
+			return "Executing";
+			break;
+		case COMPLETE:
+			return "Complete";
+			break;
+	}
+	return "";
+}
 
-/*
 class Parachute {
 private:
-GPOinterface *wire;
-
-	bool maxAltIncreasedLast;
-	bool outsideBoundariesLast;
-	bool aboveArmAltLast;
-	bool fallingLast;
+	GPOinterface *wire;
+	Battery *battery;
+	UpperCutDown *upperCut;
 
 public:
 	stateEnum state;
-	bool maxAltIncreased;
-	bool outsideBoundaries;
-	bool aboveArmAlt;
-	bool falling;
+	bool belowMaxAlt;			// Arming
+	bool falling;				// Arming and Exec
+	bool belowAltLimit;			// Executing
 
-	ElapsedMillis cutTimer;
-	ElapsedMillis timerA;
-	ElapsedMillis timerB;
+	ElapsedMillis timer;
 
-	void init(GPOinterface &wire) {
+	void init(GPOinterface *wire, Battery *battery, UpperCutDown *upperCut) {
 		this->wire = wire;
+		this->battery = battery;
+		this->upperCut = upperCut;
+
 		state = MONITORING;
-		maxAltIncreasedLast = false;
-		outsideBoundariesLast = false;
-		aboveArmAltLast = false;
-		fallingLast = false;
-		maxAltIncreased = false;
-		outsideBoundaries = false;
-		aboveArmAlt = false;
+		belowAltLimit = false;
+		belowMaxAlt = false;
 		falling = false;
+
+		timer= 0;
 	}
+
+	// Parachute deployment sequence:
+	// Arm parachute if:
+	// 		(RoC <= -20 ft/min for more than 20s AND
+	// 		currentAltitude < maxAltitude-1000ft for more than 20 seconds)
+	// Deploy parachute if:
+	// 		(currentAltitude < 10000ft AND 
+	// 		RoC <= -20 ft/min for more than 10 seconds)
+	// 			If lower cutdown is not complete, execute immediately
+	// 			Wait for lower cutdown to complete before executing
 
 	void update() {
 		switch(state) {
 			default:
-			case MONITORING:
-				if (aboveArmAlt) {
-					if (!aboveArmAltLast) timerA = 0;
-					if (timer >= 30*1000) state = ARMED;
-				}
-				aboveArmAltLast = aboveArmAlt;
-				break;
-			case ARMED:
-				if (outsideBoundaries) {
-					if (!outsideBoundariesLast) timerA = 0;
-					if (timerA >= 60*1000) {
-						state = EXECUTING;
-						wire.on(1.0, 4.2);
-						timerA = 0;
+			case MONITORING: // Waiting for conditions to arm
+				if (belowMaxAlt && falling) {
+					if (timer >= 20*1000)  {
+						state = ARMED;
+						timer = 0;
 					}
 				}
-				outsideBoundariesLast = outsideBoundaries;
-				if (falling) {
-					if (!fallingLast) timerB = 0;
-					if (timerB >= 10*1000) {
-						state = EXECUTING;
-						wire.on(1.0, 4.2);
-						timerA = 0;
+				else timer = 0;
+				break;
+			case ARMED: // Waiting for conditions to execute
+				if (falling && belowAltLimit) {
+					if (timer >= 10*1000) {
+						state = PREPPING;
+						timer = 0;
 					}
 				}
-				fallingLast = falling;
-				if (cutTimer >= 3*3600*1000) {
-					state = EXECUTING;
-					wire.on(1.0, 4.2);
-					timerA = 0;
-				}
+				else timer = 0;
 				break;
-			case EXECUTING:
-				if (timerA >= 10*1000) {
+			case PREPPING: // Waiting for upper/lower cutdown to complete
+				if (upperCut->state == COMPLETE || timer >= 22*1000) executeNow(); // Okay to deploy parachute
+				else if (upperCut->state == MONITORING ||  upperCut->state == ARMED) upperCut->prepNow(); // If not executing, execute
+				break;
+			case EXECUTING: // Wire is hot, waiting to turn off
+				if (timer >= NICH_CUT_TIME*1000) {
 					state = COMPLETE;
 					wire.off();
 				}
@@ -1156,17 +1164,18 @@ public:
 		}
 	}
 
+	void executeNow() {
+		state = EXECUTING;
+		wire.on(1.0, battery.voltage);
+		timer = 0;
+	}
 };
 
-class CutDown {
+class UpperCutDown {
 private:
 	GPOinterface *wire;
 	Battery *battery;
-
-	bool maxAltIncreasedLast;
-	bool outsideBoundariesLast;
-	bool aboveArmAltLast;
-	bool fallingLast;
+	LowerCutDown *lowerCut;
 
 public:
 	stateEnum state;
@@ -1179,57 +1188,60 @@ public:
 	elapsedMillis timerA;
 	elapsedMillis timerB;
 
-	void init(GPOinterface &wire, Battery &battery) {
+	void init(GPOinterface *wire, Battery *battery, LowerCutDown *lowerCut) {
 		this->wire = wire;
 		this->battery = battery;
+		this->lowerCut = lowerCut;
 
 		state = MONITORING;
-		maxAltIncreasedLast = false;
-		outsideBoundariesLast = false;
-		aboveArmAltLast = false;
-		fallingLast = false;
 		maxAltIncreased = false;
 		outsideBoundaries = false;
 		aboveArmAlt = false;
 		falling = false;
+
+		cutTimer = 0;
+		timerA = 0;
+		timerB = ;
 	}
+
+	// Balloon cutdown sequence:
+	// Arm cutdown if:
+	//		altitude > 10000ft for more than 60s
+	// Initiate cutdown if:
+	// 		(New max altitude is unset for more than 10mins OR
+	// 		Location exceeds boundary box for more than 60s OR
+	// 		Backup cutdown timer is exceeded) 
+	// 			If lower cutdown is not complete, execute immediately
+	// 			Wait for lower cutdown to complete before executing
 
 	void update() {
 		switch(state) {
 			default:
-			case MONITORING:
+			case MONITORING: // Waiting for conditions to arm
 				if (aboveArmAlt) {
-					if (!aboveArmAltLast) timerA = 0;
-					if (timer >= 30*1000) state = ARMED;
-				}
-				aboveArmAltLast = aboveArmAlt;
-				break;
-			case ARMED:
-				if (outsideBoundaries) {
-					if (!outsideBoundariesLast) timerA = 0;
 					if (timerA >= 60*1000) {
-						state = EXECUTING;
-						wire.on(1.0, battery.voltage);
+						state = ARMED;
 						timerA = 0;
 					}
 				}
-				outsideBoundariesLast = outsideBoundaries;
-				if (falling) {
-					if (!fallingLast) timerB = 0;
-					if (timerB >= 10*1000) {
-						state = EXECUTING;
-						wire.on(1.0, battery.voltage);
-						timerA = 0;
-					}
-				}
-				fallingLast = falling;
-				if (cutTimer >= 3*3600*1000) {
-					state = EXECUTING;
-					wire.on(1.0, battery.voltage);
-					timerA = 0;
-				}
+				else timerA = 0;
 				break;
-			case EXECUTING:
+			case ARMED:  // Waiting for conditions to execute
+				if (outsideBoundaries) {
+					if (timerA >= 60*1000) prepNow();
+				}
+				else timerA = 0;
+				if (falling) {
+					if (timerB >= 10*1000) prepNow();
+				}
+				timerB = 0;
+				if (cutTimer >= 3*3600*1000) prepNow();
+				break;
+			case PREPPING: // Waiting for lower cutdown to complete
+				if (lowerCut->state == COMPLETE || timerA >= 11*1000) executeNow(); // Okay to cutdown or timeout
+				else if (lowerCut->state == MONITORING ||  lowerCut->state == ARMED) lowerCut->executeNow(); // If not executing, execute
+				break;
+			case EXECUTING: // Wire is hot, waiting to turn off
 				if (timerA >= 10*1000) {
 					state = COMPLETE;
 					wire.off();
@@ -1238,8 +1250,83 @@ public:
 				break;
 		}
 	}
+
+	void executeNow() {
+		state = EXECUTING;
+		wire.on(1.0, battery.voltage);
+		timerA = 0;
+	}
+
+	void prepNow() {
+		state = PREPPING;
+		timerA = 0;
+	}
 };
-*/
+
+class LowerCutDown {
+private:
+	GPOinterface *wire;
+	Battery *battery;
+
+public:
+	stateEnum state;
+	bool aboveArmAlt;
+	bool aboveCutAlt;
+
+	elapsedMillis timer;
+
+	void init(GPOinterface *wire, Battery *battery) {
+		this->wire = wire;
+		this->battery = battery;
+
+		state = MONITORING;
+		aboveArmAlt = false;
+		aboveCutAlt = false;
+
+		timer = 0;
+	}
+
+	// Lower train cutdown sequence:
+	// Arm cutdown if:
+	//		altitude > 10000ft for more than 60s
+	// Initiate cutdown if:
+	// 		Altitude exceeds 70k ft for more than 60s
+
+	void update() {
+		switch(state) {
+			default:
+			case MONITORING: // Waiting for conditions to arm
+				if (aboveArmAlt) {
+					if (timer >= 60*1000) {
+						state = ARMED;
+						timer = 0;
+					}
+				}
+				else timer = 0;
+				break;
+			case ARMED:  // Waiting for conditions to execute
+				if (aboveCutAlt) {
+					if (timer >= 60*1000) executeNow();
+				}
+				else timer = 0;
+				break;
+			case EXECUTING:
+				if (timer >= 10*1000) {
+					state = COMPLETE;
+					wire.off();
+				}
+			case COMPLETE:
+				break;
+		}
+	}
+
+	void executeNow() {
+		state = EXECUTING;
+		wire.on(1.0, battery.voltage);
+		timer = 0;
+	}
+};
+
 
 //////////////////////
 // Global Variables //
@@ -1259,6 +1346,9 @@ RGBinterface rgb;
 LEDinterface led;
 Heater batteryHeat;
 Rainbow rainbowLED;
+LowerCutDown lowerCutDown;
+UpperCutDown upperCutDown;
+Parachute parachute;
 
 elapsedMicros loopTimer;
 elapsedMillis blinkTimer;
@@ -1287,15 +1377,18 @@ void setup() {
 
 	thermBat.init(THERM_1, 1.0, 1.0176, -2.0087);
 	thermExt.init(THERM_2, 1.0, 1.0176, -2.0087);
-	paraNichrome.init(GPO_2, 1.4);
-	//cutNichrome.init(GPO_1, 4.2);
-	//testNichrome.init(GPO_4, 4.2);
+	parachuteNich.init(GPO_2, 1.4);
+	upperCutNich.init(GPO_1, 1.0);
+	lowerCutNich.init(GPO_4, 1.0);
 	batteryHeat.init(GPO_3, &thermBat, 25.0, 1.0, 0.5);
-	battery.init(BAT_VSNS, BAT_VSNS_MULT, 1.0);
+	battery.init(BAT_VSNS, BAT_VSNS_MULT, 10.0);
 	button.init(PUSH_BUT, true, 8000);
 	rgb.init(RGB_R, RGB_G, RGB_B, true);
 	rainbowLED.init(&rgb);
 	led.init(LED_2);
+	lowerCutDown.init(&lowerCutNich, &battery);
+	upperCutDown.init(&upperCutNich, &battery, &lowerCutDown);
+	parachute.init((&parachuteNich, &battery, &upperCutDown);
 
 	if (!gps.init()) while(1) {
 		Serial.println("GPS initialization failed.");
@@ -1380,22 +1473,6 @@ void loop() {
 	else if (button.rose) {
 		paraNichrome.on(1.0, battery.voltage);
 		rainbowLED.on();
-	}
-
-	// Balloon cutdown sequence:
-	// Arm cutdown if:
-	//		altitude > 10000ft for more than 60s
-	// Initiate cutdown if:
-	// 		(New max altitude is unset for more than 10mins OR
-	// 		Location exceeds boundary box for more than 60s)
-	// 
-	// Parachute deployment sequence:
-	// Arm parachute if:
-	// 		(RoC <= -20 ft/min for more than 20s AND
-	// 		currentAltitude < maxAltitude-1000ft for more than 20s)
-	// Deploy parachute if:
-	// 		(currentAltitude < 10000ft AND 
-	// 		RoC <= -20 ft/min)
-	// 		
+	}	
 	
 }
