@@ -90,6 +90,12 @@
 #define PUBX00_VVEL		13	// (float)	Vertical velocity, positive downwards (m/s)
 #define PUBX00_NSAT		18	// (int)		Number of satellites used in nav solution
 
+#define S_MONITORING 		0
+#define S_ARMED 			1
+#define S_PREPPING 			2
+#define S_EXECUTING 		3
+#define S_COMPLETE 			4
+
 #define TIMEZONE			-700	// Relative to UTC (hours*100)
 
 #define NICH_CUT_TIME	10 	// Seconds
@@ -106,6 +112,27 @@
 /////////////
 // Classes //
 /////////////
+
+String printState(unsigned int state) {
+	switch (state) {
+		case S_MONITORING:
+			return "Monitoring";
+			break;
+		case S_ARMED:
+			return "Armed";
+			break;
+		case S_PREPPING:
+			return "Prepping";
+			break;
+		case S_EXECUTING:
+			return "Executing";
+			break;
+		case S_COMPLETE:
+			return "Complete";
+			break;
+	}
+	return "";
+}
 
 // Front-end for SdFat library, handles logging of data
 class SDinterface {
@@ -200,7 +227,7 @@ public:
 		else this->avgTConst = 0.63212;
 
 		// Initialize average
-		float thisVoltage;
+		float thisVoltage = 0.0;
 		for (int i = 0; i <5; i++) {
 			thisVoltage += cor1*(1000.0*V_REF/ADC_MAX)*float(analogRead(sigPin)) + cor2;
 		}
@@ -405,8 +432,6 @@ public:
 	void read() {
 		//accelGyroMag.getMotion9(&acl[0], &acl[1], &acl[2], &gyr[0], &gyr[1], &gyr[2], &mag[0], &mag[1], &mag[2],);
 	}
-
-
 };
 */
 
@@ -937,7 +962,7 @@ public:
 		if (avgTConst > 0.0 && avgTConst <= 100.0) this->avgTConst = 0.63212*(1.0/avgTConst);
 		else this->avgTConst = 0.063212;
 
-		float thisVoltage;
+		float thisVoltage = 0.0;
 		for (int i = 0; i <5; i++) {
 			thisVoltage += (V_REF/ADC_MAX)*voltMult*float(analogRead(snsPin));
 		}
@@ -1070,216 +1095,23 @@ public:
 	}
 };
 
-enum stateEnum {MONITORING, ARMED, PREPPING, EXECUTING, COMPLETE};
-String printEnum(stateEnum state) {
-	switch (state) {
-		case MONITORING:
-			return "Monitoring";
-			break;
-		case ARMED:
-			return "Armed";
-			break;
-		case PREPPING:
-			return "Prepping";
-			break;
-		case EXECUTING:
-			return "Executing";
-			break;
-		case COMPLETE:
-			return "Complete";
-			break;
-	}
-	return "";
-}
-
-class Parachute {
-private:
-	GPOinterface *wire;
-	Battery *battery;
-	UpperCutDown *upperCut;
-
-public:
-	stateEnum state;
-	bool belowMaxAlt;			// Arming
-	bool falling;				// Arming and Exec
-	bool belowAltLimit;			// Executing
-
-	ElapsedMillis timer;
-
-	void init(GPOinterface *wire, Battery *battery, UpperCutDown *upperCut) {
-		this->wire = wire;
-		this->battery = battery;
-		this->upperCut = upperCut;
-
-		state = MONITORING;
-		belowAltLimit = false;
-		belowMaxAlt = false;
-		falling = false;
-
-		timer= 0;
-	}
-
-	// Parachute deployment sequence:
-	// Arm parachute if:
-	// 		(RoC <= -20 ft/min for more than 20s AND
-	// 		currentAltitude < maxAltitude-1000ft for more than 20 seconds)
-	// Deploy parachute if:
-	// 		(currentAltitude < 10000ft AND 
-	// 		RoC <= -20 ft/min for more than 10 seconds)
-	// 			If lower cutdown is not complete, execute immediately
-	// 			Wait for lower cutdown to complete before executing
-
-	void update() {
-		switch(state) {
-			default:
-			case MONITORING: // Waiting for conditions to arm
-				if (belowMaxAlt && falling) {
-					if (timer >= 20*1000)  {
-						state = ARMED;
-						timer = 0;
-					}
-				}
-				else timer = 0;
-				break;
-			case ARMED: // Waiting for conditions to execute
-				if (falling && belowAltLimit) {
-					if (timer >= 10*1000) {
-						state = PREPPING;
-						timer = 0;
-					}
-				}
-				else timer = 0;
-				break;
-			case PREPPING: // Waiting for upper/lower cutdown to complete
-				if (upperCut->state == COMPLETE || timer >= 22*1000) executeNow(); // Okay to deploy parachute
-				else if (upperCut->state == MONITORING ||  upperCut->state == ARMED) upperCut->prepNow(); // If not executing, execute
-				break;
-			case EXECUTING: // Wire is hot, waiting to turn off
-				if (timer >= NICH_CUT_TIME*1000) {
-					state = COMPLETE;
-					wire.off();
-				}
-			case COMPLETE:
-				break;
-		}
-	}
-
-	void executeNow() {
-		state = EXECUTING;
-		wire.on(1.0, battery.voltage);
-		timer = 0;
-	}
-};
-
-class UpperCutDown {
-private:
-	GPOinterface *wire;
-	Battery *battery;
-	LowerCutDown *lowerCut;
-
-public:
-	stateEnum state;
-	bool maxAltIncreased;
-	bool outsideBoundaries;
-	bool aboveArmAlt;
-	bool falling;
-
-	elapsedMillis cutTimer;
-	elapsedMillis timerA;
-	elapsedMillis timerB;
-
-	void init(GPOinterface *wire, Battery *battery, LowerCutDown *lowerCut) {
-		this->wire = wire;
-		this->battery = battery;
-		this->lowerCut = lowerCut;
-
-		state = MONITORING;
-		maxAltIncreased = false;
-		outsideBoundaries = false;
-		aboveArmAlt = false;
-		falling = false;
-
-		cutTimer = 0;
-		timerA = 0;
-		timerB = ;
-	}
-
-	// Balloon cutdown sequence:
-	// Arm cutdown if:
-	//		altitude > 10000ft for more than 60s
-	// Initiate cutdown if:
-	// 		(New max altitude is unset for more than 10mins OR
-	// 		Location exceeds boundary box for more than 60s OR
-	// 		Backup cutdown timer is exceeded) 
-	// 			If lower cutdown is not complete, execute immediately
-	// 			Wait for lower cutdown to complete before executing
-
-	void update() {
-		switch(state) {
-			default:
-			case MONITORING: // Waiting for conditions to arm
-				if (aboveArmAlt) {
-					if (timerA >= 60*1000) {
-						state = ARMED;
-						timerA = 0;
-					}
-				}
-				else timerA = 0;
-				break;
-			case ARMED:  // Waiting for conditions to execute
-				if (outsideBoundaries) {
-					if (timerA >= 60*1000) prepNow();
-				}
-				else timerA = 0;
-				if (falling) {
-					if (timerB >= 10*1000) prepNow();
-				}
-				timerB = 0;
-				if (cutTimer >= 3*3600*1000) prepNow();
-				break;
-			case PREPPING: // Waiting for lower cutdown to complete
-				if (lowerCut->state == COMPLETE || timerA >= 11*1000) executeNow(); // Okay to cutdown or timeout
-				else if (lowerCut->state == MONITORING ||  lowerCut->state == ARMED) lowerCut->executeNow(); // If not executing, execute
-				break;
-			case EXECUTING: // Wire is hot, waiting to turn off
-				if (timerA >= 10*1000) {
-					state = COMPLETE;
-					wire.off();
-				}
-			case COMPLETE:
-				break;
-		}
-	}
-
-	void executeNow() {
-		state = EXECUTING;
-		wire.on(1.0, battery.voltage);
-		timerA = 0;
-	}
-
-	void prepNow() {
-		state = PREPPING;
-		timerA = 0;
-	}
-};
-
 class LowerCutDown {
 private:
 	GPOinterface *wire;
-	Battery *battery;
+	BatterySense *battery;
 
 public:
-	stateEnum state;
+	unsigned int state;
 	bool aboveArmAlt;
 	bool aboveCutAlt;
 
 	elapsedMillis timer;
 
-	void init(GPOinterface *wire, Battery *battery) {
+	void init(GPOinterface *wire, BatterySense *battery) {
 		this->wire = wire;
 		this->battery = battery;
 
-		state = MONITORING;
+		state = S_MONITORING;
 		aboveArmAlt = false;
 		aboveCutAlt = false;
 
@@ -1295,34 +1127,205 @@ public:
 	void update() {
 		switch(state) {
 			default:
-			case MONITORING: // Waiting for conditions to arm
+			case S_MONITORING: // Waiting for conditions to arm
 				if (aboveArmAlt) {
 					if (timer >= 60*1000) {
-						state = ARMED;
+						state = S_ARMED;
 						timer = 0;
 					}
 				}
 				else timer = 0;
 				break;
-			case ARMED:  // Waiting for conditions to execute
+			case S_ARMED:  // Waiting for conditions to execute
 				if (aboveCutAlt) {
 					if (timer >= 60*1000) executeNow();
 				}
 				else timer = 0;
 				break;
-			case EXECUTING:
+			case S_EXECUTING:
 				if (timer >= 10*1000) {
-					state = COMPLETE;
-					wire.off();
+					state = S_COMPLETE;
+					wire->off();
 				}
-			case COMPLETE:
+			case S_COMPLETE:
 				break;
 		}
 	}
 
 	void executeNow() {
-		state = EXECUTING;
-		wire.on(1.0, battery.voltage);
+		state = S_EXECUTING;
+		wire->on(1.0, battery->voltage);
+		timer = 0;
+	}
+};
+
+class UpperCutDown {
+private:
+	GPOinterface *wire;
+	BatterySense *battery;
+	LowerCutDown *lowerCut;
+
+public:
+	unsigned int state;
+	bool maxAltIncreased;
+	bool outsideBoundaries;
+	bool aboveArmAlt;
+	bool falling;
+
+	elapsedMillis cutTimer;
+	elapsedMillis timerA;
+	elapsedMillis timerB;
+
+	void init(GPOinterface *wire, BatterySense *battery, LowerCutDown *lowerCut) {
+		this->wire = wire;
+		this->battery = battery;
+		this->lowerCut = lowerCut;
+
+		state = S_MONITORING;
+		maxAltIncreased = false;
+		outsideBoundaries = false;
+		aboveArmAlt = false;
+		falling = false;
+
+		cutTimer = 0;
+		timerA = 0;
+		timerB = 0;
+	}
+
+	// Balloon cutdown sequence:
+	// Arm cutdown if:
+	//		altitude > 10000ft for more than 60s
+	// Initiate cutdown if:
+	// 		(New max altitude is unset for more than 10mins OR
+	// 		Location exceeds boundary box for more than 60s OR
+	// 		Backup cutdown timer is exceeded) 
+	// 			If lower cutdown is not complete, execute immediately
+	// 			Wait for lower cutdown to complete before executing
+
+	void update() {
+		switch(state) {
+			default:
+			case S_MONITORING: // Waiting for conditions to arm
+				if (aboveArmAlt) {
+					if (timerA >= 60*1000) {
+						state = S_ARMED;
+						timerA = 0;
+					}
+				}
+				else timerA = 0;
+				break;
+			case S_ARMED:  // Waiting for conditions to execute
+				if (outsideBoundaries) {
+					if (timerA >= 60*1000) prepNow();
+				}
+				else timerA = 0;
+				if (falling) {
+					if (timerB >= 10*1000) prepNow();
+				}
+				timerB = 0;
+				if (cutTimer >= 3*3600*1000) prepNow();
+				break;
+			case S_PREPPING: // Waiting for lower cutdown to complete
+				if (lowerCut->state == S_COMPLETE || timerA >= 11*1000) executeNow(); // Okay to cutdown or timeout
+				else if (lowerCut->state == S_MONITORING ||  lowerCut->state == S_ARMED) lowerCut->executeNow(); // If not executing, execute
+				break;
+			case S_EXECUTING: // Wire is hot, waiting to turn off
+				if (timerA >= 10*1000) {
+					state = S_COMPLETE;
+					wire->off();
+				}
+			case S_COMPLETE:
+				break;
+		}
+	}
+
+	void executeNow() {
+		state = S_EXECUTING;
+		wire->on(1.0, battery->voltage);
+		timerA = 0;
+	}
+
+	void prepNow() {
+		state = S_PREPPING;
+		timerA = 0;
+	}
+};
+
+class Parachute {
+private:
+	GPOinterface *wire;
+	BatterySense *battery;
+	UpperCutDown *upperCut;
+
+public:
+	unsigned int state;
+	bool belowMaxAlt;			// Arming
+	bool falling;				// Arming and Exec
+	bool belowAltLimit;			// Executing
+
+	elapsedMillis timer;
+
+	void init(GPOinterface *wire, BatterySense *battery, UpperCutDown *upperCut) {
+		this->wire = wire;
+		this->battery = battery;
+		this->upperCut = upperCut;
+
+		state = S_MONITORING;
+		belowAltLimit = false;
+		belowMaxAlt = false;
+		falling = false;
+
+		timer = 0;
+	}
+
+	// Parachute deployment sequence:
+	// Arm parachute if:
+	// 		(RoC <= -20 ft/min for more than 20s AND
+	// 		currentAltitude < maxAltitude-1000ft for more than 20 seconds)
+	// Deploy parachute if:
+	// 		(currentAltitude < 10000ft AND 
+	// 		RoC <= -20 ft/min for more than 10 seconds)
+	// 			If lower cutdown is not complete, execute immediately
+	// 			Wait for lower cutdown to complete before executing
+
+	void update() {
+		switch(state) {
+			default:
+			case S_MONITORING: // Waiting for conditions to arm
+				if (belowMaxAlt && falling) {
+					if (timer >= 20*1000)  {
+						state = S_ARMED;
+						timer = 0;
+					}
+				}
+				else timer = 0;
+				break;
+			case S_ARMED: // Waiting for conditions to execute
+				if (falling && belowAltLimit) {
+					if (timer >= 10*1000) {
+						state = S_PREPPING;
+						timer = 0;
+					}
+				}
+				else timer = 0;
+				break;
+			case S_PREPPING: // Waiting for upper/lower cutdown to complete
+				if (upperCut->state == S_COMPLETE || timer >= 22*1000) executeNow(); // Okay to deploy parachute
+				else if (upperCut->state == S_MONITORING ||  upperCut->state == S_ARMED) upperCut->prepNow(); // If not executing, execute
+				break;
+			case S_EXECUTING: // Wire is hot, waiting to turn off
+				if (timer >= NICH_CUT_TIME*1000) {
+					state = S_COMPLETE;
+					wire->off();
+				}
+			case S_COMPLETE:
+				break;
+		}
+	}
+
+	void executeNow() {
+		state = S_EXECUTING;
+		wire->on(1.0, battery->voltage);
 		timer = 0;
 	}
 };
@@ -1338,9 +1341,9 @@ MS5607interface barometer;
 //MPU9250interface inertial;
 MAXM8interface gps;
 PushButton button;
-GPOinterface paraNichrome;
-GPOinterface cutNichrome;
-GPOinterface testNichrome;
+GPOinterface parachuteNich;
+GPOinterface upperCutNich;
+GPOinterface lowerCutNich;
 BatterySense battery;
 RGBinterface rgb;
 LEDinterface led;
@@ -1356,9 +1359,6 @@ elapsedMillis cutdownTimer;
 
 bool lightToggle;
 bool loggingEnabled;
-
-stateEnum cutdownState;
-stateEnum parachuteState;
 
 ////////////////////
 // Main Functions //
@@ -1388,7 +1388,7 @@ void setup() {
 	led.init(LED_2);
 	lowerCutDown.init(&lowerCutNich, &battery);
 	upperCutDown.init(&upperCutNich, &battery, &lowerCutDown);
-	parachute.init((&parachuteNich, &battery, &upperCutDown);
+	parachute.init(&parachuteNich, &battery, &upperCutDown);
 
 	if (!gps.init()) while(1) {
 		Serial.println("GPS initialization failed.");
@@ -1467,11 +1467,11 @@ void loop() {
 	}
 
 	if (button.fell) {
-		paraNichrome.off();
+		parachuteNich.off();
 		rainbowLED.off();
 	}
 	else if (button.rose) {
-		paraNichrome.on(1.0, battery.voltage);
+		parachuteNich.on(1.0, battery.voltage);
 		rainbowLED.on();
 	}	
 	
