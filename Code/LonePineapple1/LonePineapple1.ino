@@ -1,8 +1,6 @@
 #include <SdFat.h>
 #include <Wire.h>
 #include <EEPROM.h>
-//#include <MPU9150_9Axis_MotionApps41.h>
-//#include <helper_3dmath.h>
 #include "gpsConfig.h"
 
 // TODO:
@@ -56,7 +54,7 @@
 #define MS5607_ADDR		0x77 // 6 MSBs of address. B111011x is complete address, with x being ~CSB
 #define MPU9250_ADDR	0x69 // 6 MSBs of address. B111011x is complete address, with x being CSB
 
-#define CSV_BUFFER_SIZE	16
+#define CSV_BUFFER_SIZE	19
 #define LOG_HEADER			"Time,Lat,Long,Alt,RoC,GndSpd,GndCrs,Acc,nSats,ExtTemp,BatTemp,IntTemp,Pres,BatVolt,BatCap,BatHeat\n"
 #define LOG_PERIOD			1000 // ms
 #define CSV_TIME				0
@@ -75,6 +73,9 @@
 #define CSV_BATVOLT			13
 #define CSV_BATCAP			14
 #define CSV_BATHEAT			15
+#define CSV_PARACHUTE		16
+#define CSV_UPPERCUT		17
+#define CSV_LOWERCUT		18
 
 #define PUBX00_TIME		2		// (float)	hhmmss.ss
 #define PUBX00_LAT		3		// (float)	ddmm.mmmmm
@@ -91,12 +92,12 @@
 #define PUBX00_NSAT		18	// (int)		Number of satellites used in nav solution
 
 #define S_MONITORING 		0
-#define S_ARMED 			1
+#define S_ARMED 				1
 #define S_PREPPING 			2
 #define S_EXECUTING 		3
 #define S_COMPLETE 			4
 
-#define TIMEZONE			-700	// Relative to UTC (hours*100)
+#define TIMEZONE			 -70000	// Relative to UTC (hours*1000)
 
 #define NICH_CUT_TIME	10 	// Seconds
 
@@ -199,6 +200,7 @@ public:
 			cardOK = file.close();
 			return cardOK;
 		}
+		else return false;
 	}
 };
 
@@ -633,7 +635,8 @@ private:
 			
 				switch(valIndex) {
 					case PUBX00_TIME:
-						time = value.toFloat() + TIMEZONE;
+						//time = value.toFloat() + TIMEZONE;
+						time = value.toFloat();
 						if (time < 0) time += 2400;
 						else if (time > 2400) time -= 2400;
 						break;
@@ -741,7 +744,7 @@ public:
 class GPOinterface {
 private:
 	unsigned int pin;
-	unsigned int maxVoltage;
+	float maxVoltage;
 
 public:
 	void init(unsigned int pin, float maxVoltage) {
@@ -1223,7 +1226,7 @@ public:
 					if (timerB >= 10*1000) prepNow();
 				}
 				timerB = 0;
-				if (cutTimer >= 3*3600*1000) prepNow();
+				if (cutTimer >= 2*3600*1000) prepNow();
 				break;
 			case S_PREPPING: // Waiting for lower cutdown to complete
 				if (lowerCut->state == S_COMPLETE || timerA >= 11*1000) executeNow(); // Okay to cutdown or timeout
@@ -1360,6 +1363,9 @@ elapsedMillis cutdownTimer;
 bool lightToggle;
 bool loggingEnabled;
 
+float maxRecordedAlt;
+float prevAlt;
+
 ////////////////////
 // Main Functions //
 ////////////////////
@@ -1377,11 +1383,11 @@ void setup() {
 
 	thermBat.init(THERM_1, 1.0, 1.0176, -2.0087);
 	thermExt.init(THERM_2, 1.0, 1.0176, -2.0087);
-	parachuteNich.init(GPO_2, 1.4);
-	upperCutNich.init(GPO_1, 1.0);
-	lowerCutNich.init(GPO_4, 1.0);
-	batteryHeat.init(GPO_3, &thermBat, 25.0, 1.0, 0.5);
-	battery.init(BAT_VSNS, BAT_VSNS_MULT, 10.0);
+	parachuteNich.init(GPO_2, 0.9);
+	upperCutNich.init(GPO_1, 1.1);
+	lowerCutNich.init(GPO_4, 1.2);
+	batteryHeat.init(GPO_3, &thermBat, 5.0, 1.0, 0.5);
+	battery.init(BAT_VSNS, BAT_VSNS_MULT, 1.0);
 	button.init(PUSH_BUT, true, 8000);
 	rgb.init(RGB_R, RGB_G, RGB_B, true);
 	rainbowLED.init(&rgb);
@@ -1404,7 +1410,6 @@ void setup() {
 		rgb.color(0,0,0);
 		delay(500);
 	}
-	/*
 	if (!sdCard.init(SD_CS)) while(1) {
 		Serial.println("SD card initialization failed.");
 		rgb.color(127,0,0);
@@ -1412,10 +1417,12 @@ void setup() {
 		rgb.color(0,0,0);
 		delay(500);
 	}
-	*/
 
 	loopTimer = 0;
 	blinkTimer = 0;
+
+	maxRecordedAlt = 0.0;
+	prevAlt = 0.0;
 }
 
 void loop() {	
@@ -1430,6 +1437,69 @@ void loop() {
 
 	loopTimer = 0;
 
+	// Nichrome class states
+	if (gps.newData) {
+		if (maxRecordedAlt < gps.altitude - gps.accuracy) {
+			maxRecordedAlt = gps.altitude - gps.accuracy;
+		}
+
+		if (gps.altitude < maxRecordedAlt - 304.8 || button.state) parachute.belowMaxAlt = true;
+		else parachute.belowMaxAlt = false;
+
+		if (gps.altitude >= 3048.0) { // 10k ft
+			lowerCutDown.aboveArmAlt = true;
+			upperCutDown.aboveArmAlt = true;
+			parachute.belowAltLimit = true;
+		}
+		else {
+			lowerCutDown.aboveArmAlt = false;
+			upperCutDown.aboveArmAlt = false;
+			parachute.belowAltLimit = false;
+		}
+
+		if (gps.altitude >= 21336.0) // 70k ft
+			lowerCutDown.aboveCutAlt = true;
+		else lowerCutDown.aboveCutAlt = false;
+
+		if (gps.altitude - prevAlt <= -7.0) {
+			upperCutDown.falling = true;
+			parachute.falling = true;
+		}
+		else {
+			upperCutDown.falling = false;
+			parachute.falling = false;
+		}
+
+		// Format: ddmm.mmmmm, dddmm.mmmmm
+		// 				 latitude,	 longitude
+		// Lower right corner: 4628.15314, -11703.70902
+		// Upper left  corner: 4746.63872, -11951.79980
+		if (gps.latitude  >= 4628.15314  && gps.latitude  <= 4746.63872
+		 && gps.longitude >= -11951.79980 && gps.longitude <= -11703.70902) {
+			upperCutDown.outsideBoundaries = false;
+		}
+		else upperCutDown.outsideBoundaries = true;
+
+		/*
+		Serial.print("maxRecordedAlt: ");
+		Serial.print(maxRecordedAlt);
+		Serial.print(", parachute.belowMaxAlt: ");
+		Serial.print(parachute.belowMaxAlt);
+		Serial.print(", upperCutDown.aboveArmAlt: ");
+		Serial.print(upperCutDown.aboveArmAlt);
+		Serial.print(", lowerCutDown.aboveCutAlt: ");
+		Serial.print(lowerCutDown.aboveCutAlt);
+		Serial.print(", upperCutDown.falling: ");
+		Serial.println(upperCutDown.falling);
+		*/
+	}
+
+	parachute.update();
+	upperCutDown.update();
+	lowerCutDown.update();
+
+	upperCutDown.maxAltIncreased = false;
+
 	if (gps.newData) {
 		barometer.measure();
 
@@ -1437,7 +1507,7 @@ void loop() {
 		sdCard.buffer(gps.latitude, CSV_LAT, 5);
 		sdCard.buffer(gps.longitude, CSV_LONG, 5);
 		sdCard.buffer(gps.altitude, CSV_ALT, 2);
-		sdCard.buffer(gps.rateOfClimb, CSV_ROC, 2);
+		sdCard.buffer(gps.altitude - prevAlt, CSV_ROC, 2);
 		sdCard.buffer(gps.groundSpeed, CSV_GNDSPD, 2);
 		sdCard.buffer(gps.groundCourse, CSV_GNDCRS, 1);
 		sdCard.buffer(gps.accuracy, CSV_ACC, 2);
@@ -1449,30 +1519,38 @@ void loop() {
 		sdCard.buffer(battery.voltage, CSV_BATVOLT, 2);
 		sdCard.buffer(battery.getCap(), CSV_BATCAP, 2);
 		sdCard.buffer(batteryHeat.dutyCycle, CSV_BATHEAT, 2);
+		sdCard.buffer(parachute.state, CSV_PARACHUTE);
+		sdCard.buffer(upperCutDown.state, CSV_UPPERCUT);
+		sdCard.buffer(lowerCutDown.state, CSV_LOWERCUT);
 
 		for (int i = 0; i < CSV_BUFFER_SIZE; i++) {
 			Serial.print(sdCard.cvsBuffer[i]);
 			Serial.print(",");
 		}
+		Serial.print(gps.altitude - prevAlt);
 		Serial.println();
 
-		//if (rainbowLED.active) sdCard.logToSD();
+		sdCard.logToSD();
 
 		blinkTimer = 0;
 		lightToggle = true;
 		led.write(255);
+		 if (gps.gpsLock) rgb.color(0, 127, 0);
 	}
 	if (lightToggle && blinkTimer > 200) {
 		led.write(0);
+		if (gps.gpsLock) rgb.color(0, 0, 0);
 	}
 
+	prevAlt = gps.altitude;
+
+	/*
 	if (button.fell) {
-		parachuteNich.off();
 		rainbowLED.off();
 	}
 	else if (button.rose) {
-		parachuteNich.on(1.0, battery.voltage);
 		rainbowLED.on();
-	}	
+	}
+	*/
 	
 }
